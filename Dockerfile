@@ -3,6 +3,9 @@ FROM nedbank-de-challenge/base:1.0
 # Install any additional Python dependencies you need beyond the base image.
 # Leave requirements.txt empty if the base packages are sufficient.
 WORKDIR /app
+
+ENV PYTHONPATH=/app
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
