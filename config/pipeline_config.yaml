@@ -48,8 +48,20 @@ spark:
   local_dir: /data/output/_spark_tmp
   parquet_compression: gzip
 
-# ── DQ rules reference ────────────────────────────────────────
-# Stage 2+: path to the DQ rules file. Your pipeline must read
-# DQ logic from this file rather than hardcoding it.
-# dq:
-#   rules_path: /data/config/dq_rules.yaml
+# ── Silver casting / dedupe (extend without code changes where possible) ──
+silver:
+  dedupe_order_column: ingestion_timestamp
+  casting:
+    customers:
+      date_columns: [dob]
+      integer_columns: [risk_score]
+    accounts:
+      date_columns: [open_date, last_activity_date]
+      decimal_columns: [credit_limit, current_balance]
+    transactions:
+      date_columns: [transaction_date]
+      decimal_columns: [amount]
+
+# ── DQ rules (Stage 1 reads defaults; Stage 2+ expands dq_report.json etc.)
+dq:
+  rules_path: /data/config/dq_rules.yaml

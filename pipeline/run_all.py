@@ -41,5 +41,9 @@ if __name__ == "__main__":
 
     logger.info("=== Stage: Bronze ingestion ===")
     run_ingestion(spark, config)
-    run_transformation()
+
+    logger.info("=== Stage: Silver transformation ===")
+    run_transformation(spark, config)
+
+    logger.info("=== Stage: Gold provisioning ===")
     run_provisioning()

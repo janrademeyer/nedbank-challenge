@@ -1,0 +1,33 @@
+# Consumed by pipeline/transform.py — extend for Stage 2+ without editing Python literals.
+
+transactions:
+  required_non_null:
+    - transaction_id
+    - account_id
+    - transaction_date
+    - transaction_time
+    - transaction_type
+    - currency
+    - channel
+
+  transaction_type_allowed:
+    - DEBIT
+    - CREDIT
+    - FEE
+    - REVERSAL
+
+  channel_allowed:
+    - POS
+    - APP
+    - ATM
+    - EFT
+    - USSD
+    - INTERNAL
+
+currency:
+  canonical: ZAR
+  normalise_map:
+    ZAR: ZAR
+    R: ZAR
+    RANDS: ZAR
+    "710": ZAR
