@@ -43,9 +43,10 @@ output:
 spark:
   master: local[2]
   app_name: nedbank-de-pipeline
-  # Spark writes temporary files to /tmp. The scoring system provides
-  # a 512 MB tmpfs at /tmp — keep intermediate data small.
-  # spark.local.dir: /tmp
+  shuffle_partitions: 8
+  # Writable bind mount; avoids Snappy JNI on noexec tmpfs (see helper.py java.io.tmpdir).
+  local_dir: /data/output/_spark_tmp
+  parquet_compression: gzip
 
 # ── DQ rules reference ────────────────────────────────────────
 # Stage 2+: path to the DQ rules file. Your pipeline must read

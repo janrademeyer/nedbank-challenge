@@ -25,14 +25,41 @@ Spark configuration tip:
   Configure Delta Lake using the builder pattern shown in the base image docs.
 """
 
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+import logging
+import os
+from datetime import datetime
 
-def run_ingestion():
-    # TODO: Implement Bronze layer ingestion.
-    #
-    # Suggested steps:
-    #   1. Load pipeline_config.yaml to get input/output paths.
-    #   2. Initialise a SparkSession with Delta Lake support (local[2]).
-    #   3. Read accounts.csv → append ingestion_timestamp → write to bronze/accounts/.
-    #   4. Read transactions.jsonl → append ingestion_timestamp → write to bronze/transactions/.
-    #   5. Read customers.csv → append ingestion_timestamp → write to bronze/customers/.
-    pass
+logger = logging.getLogger(__name__)
+
+def run_ingestion(spark: SparkSession, config: dict):
+    # Bronze: raw landing — CSV columns stay STRING (inferSchema=False); typing happens in Silver.
+    ingestion_ts = F.lit(datetime.now()).cast("timestamp")
+
+    inp = config["input"]
+    bronze_base = config["output"]["bronze_path"]
+
+    # Accounts
+    logger.info("Bronze: accounts — reading")
+    accounts_df = spark.read.csv(inp["accounts_path"], header=True, inferSchema=False).withColumn(
+        "ingestion_timestamp", ingestion_ts
+    )
+    logger.info("Bronze: accounts — writing Delta")
+    accounts_df.write.format("delta").mode("overwrite").save(os.path.join(bronze_base, "accounts"))
+
+    # Transactions
+    logger.info("Bronze: transactions — reading")
+    transactions_df = spark.read.json(inp["transactions_path"]).withColumn(
+        "ingestion_timestamp", ingestion_ts
+    )
+    logger.info("Bronze: transactions — writing Delta")
+    transactions_df.write.format("delta").mode("overwrite").save(os.path.join(bronze_base, "transactions"))
+
+    # Customers
+    logger.info("Bronze: customers — reading")
+    customers_df = spark.read.csv(inp["customers_path"], header=True, inferSchema=False).withColumn(
+        "ingestion_timestamp", ingestion_ts
+    )
+    logger.info("Bronze: customers — writing Delta")
+    customers_df.write.format("delta").mode("overwrite").save(os.path.join(bronze_base, "customers"))
