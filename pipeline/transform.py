@@ -150,6 +150,8 @@ def _transactions_flatten(bronze_tx: DataFrame) -> DataFrame:
         else F.lit(None).cast("string")
     )
 
+    dup_cnt = F.col("_dup_cnt") if "_dup_cnt" in cols else F.lit(1)
+
     return bronze_tx.select(
         F.col("transaction_id"),
         F.col("account_id"),
@@ -163,6 +165,7 @@ def _transactions_flatten(bronze_tx: DataFrame) -> DataFrame:
         F.col("channel"),
         province_col.alias("province"),
         F.col("ingestion_timestamp"),
+        dup_cnt.alias("_dup_cnt"),
     )
 
 
@@ -206,6 +209,8 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
     # ── Transactions: DQ flags + normalized currency; orphans vs Silver accounts slice
     logger.info("Silver: transactions — reading Bronze")
     tx_bronze = spark.read.format("delta").load(os.path.join(bronze_base, "transactions"))
+    w_tid = Window.partitionBy("transaction_id")
+    tx_bronze = tx_bronze.withColumn("_dup_cnt", F.count(F.lit(1)).over(w_tid))
     tx_work = _dedupe_latest(tx_bronze, "transaction_id", order_col)
     tx_work = _transactions_flatten(tx_work)
 
@@ -248,11 +253,20 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
         null_req = cond if null_req is None else (null_req | cond)
 
     raw_amt_str = F.trim(F.col("_amount_raw").cast("string"))
-    type_mismatch_amt = (
+    cast_failed_amt = (
         F.col("_amount_raw").isNotNull()
         & (raw_amt_str != F.lit(""))
         & F.col("amount").isNull()
     )
+    tx_amt_rules = dq_rules.get("transactions") or {}
+    # Default false: Spark JSON often widens amount to StringType for all rows, which would
+    # over-flag TYPE_MISMATCH; set true in dq_rules when your Spark schema keeps native numeric.
+    flag_str_amt = bool(tx_amt_rules.get("flag_string_amount_type_mismatch", False))
+    amt_was_string = F.expr('typeof(_amount_raw) = "string"')
+    string_numeric_ok = (
+        amt_was_string & F.col("amount").isNotNull() if flag_str_amt else F.lit(False)
+    )
+    type_mismatch_amt = cast_failed_amt | string_numeric_ok
 
     date_bad = (
         ~F.col("_transaction_date_raw").isNull()
@@ -283,10 +297,13 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
 
     domain_bad = tt_bad | ch_bad
 
+    duplicate_delivery = F.col("_dup_cnt") > F.lit(1)
+
     # Precedence matches output_schema single-flag semantics (first hit wins).
     dq_flag = (
         F.when(null_req if null_req is not None else F.lit(False), F.lit("NULL_REQUIRED"))
         .when(orphaned, F.lit("ORPHANED_ACCOUNT"))
+        .when(duplicate_delivery, F.lit("DUPLICATE_DEDUPED"))
         .when(type_mismatch_amt | domain_bad, F.lit("TYPE_MISMATCH"))
         .when(date_bad, F.lit("DATE_FORMAT"))
         .when(cur_variant, F.lit("CURRENCY_VARIANT"))
@@ -296,7 +313,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
     # Build dq_flag before dropping helper cols (Spark binds columns by DF lineage).
     tx_out = (
         tx_join.withColumn("dq_flag", dq_flag)
-        .drop("_acct_hit", "_amount_raw", "_transaction_date_raw")
+        .drop("_acct_hit", "_amount_raw", "_transaction_date_raw", "_dup_cnt")
         .withColumn("currency", norm_cur)
     )
 

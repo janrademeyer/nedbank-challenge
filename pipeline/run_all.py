@@ -13,19 +13,21 @@ Do not add interactive prompts, argument parsing that blocks execution,
 or any code that reads from stdin. The container has no TTY attached.
 """
 
+import logging
 import os
+import time
+from datetime import datetime, timezone
 
 # Before PySpark starts the JVM (docker --network=none has no DNS for the container hostname).
 os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
 os.environ.setdefault("SPARK_LOCAL_HOSTNAME", "localhost")
 
-import logging
-
+from pipeline.dq_report import write_dq_report
+from pipeline.helper import build_spark_session, load_config
 from pipeline.ingest import run_ingestion
-from pipeline.transform import run_transformation
 from pipeline.provision import run_provisioning
-from pipeline.helper import *
- 
+from pipeline.transform import run_transformation
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -33,8 +35,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
+    wall_start = time.perf_counter()
+    run_started_utc = datetime.now(timezone.utc)
 
-    # Load config and build the spark session
     config = load_config()
     spark = build_spark_session(config)
 
@@ -46,3 +49,15 @@ if __name__ == "__main__":
 
     logger.info("=== Stage: Gold provisioning ===")
     run_provisioning(spark, config)
+
+    duration_sec = int(round(time.perf_counter() - wall_start))
+    pipeline_stage = str(config.get("pipeline_stage", "2"))
+    if pipeline_stage != "1":
+        logger.info("=== DQ report (stage %s) ===", pipeline_stage)
+        write_dq_report(
+            spark,
+            config,
+            run_started_utc=run_started_utc,
+            execution_seconds=duration_sec,
+            stage=pipeline_stage,
+        )

@@ -1,6 +1,10 @@
 # ============================================================
 # Pipeline Configuration
 #
+# pipeline_stage: submit Stage 1 with "1" (skips dq_report.json); Stage 2/3 use "2"/"3".
+pipeline_stage: "2"
+
+#
 # All paths are absolute paths inside the Docker container.
 # Do NOT change the /data/input/ or /data/output/ prefixes —
 # these are fixed mount points enforced by the scoring system.
