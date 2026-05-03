@@ -26,6 +26,8 @@ RUN mkdir -p /opt/delta-jars \
 # via Docker volume mounts by the scoring system.
 COPY pipeline/ pipeline/
 COPY config/ config/
+# Architecture Decision Record(s) for Stage 3 panel review (submission_guide / adr_template).
+COPY adr/ adr/
 
 # Entry point — must run the complete pipeline end-to-end without interactive input.
 # The scoring system uses this CMD directly; do not require TTY or stdin.

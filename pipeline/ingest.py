@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 def run_ingestion(spark: SparkSession, config: dict):
     # Bronze: raw landing — CSV columns stay STRING (inferSchema=False); typing happens in Silver.
-    # Flow is somply read, append timestamp, and write to storage
+    # Flow is simply read, append timestamp, and write to storage
     ingestion_ts = F.lit(datetime.now()).cast("timestamp")
 
     inp = config["input"]

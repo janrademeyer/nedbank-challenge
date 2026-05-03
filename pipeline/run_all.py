@@ -1,10 +1,15 @@
 """
 Pipeline entry point.
 
-Orchestrates the three medallion architecture stages in order:
+Orchestrates the medallion stages in order:
   1. Ingest  — reads raw source files into Bronze layer Delta tables
   2. Transform — cleans and conforms Bronze into Silver layer Delta tables
   3. Provision — joins and aggregates Silver into Gold layer Delta tables
+
+When ``pipeline_stage`` is ``"3"`` (see pipeline_config.yaml), run_stream_ingestion
+runs after batch Gold: polls ``/data/stream`` for JSONL micro-batches and writes
+``stream_gold`` Delta tables. DQ report generation still runs last so counts and
+timing reflect batch + stream together (stage ``"1"`` skips DQ entirely).
 
 The scoring system invokes this file directly:
   docker run ... python pipeline/run_all.py
@@ -50,8 +55,16 @@ if __name__ == "__main__":
     logger.info("=== Stage: Gold provisioning ===")
     run_provisioning(spark, config)
 
+    pipeline_stage = str(config.get("pipeline_stage", "3"))
+    # Lazy import keeps Stage 1–2 cold paths free of stream_ingest (and Delta merge paths) until needed.
+    if pipeline_stage == "3":
+        logger.info("=== Stage: Stream ingestion (Stage 3) ===")
+        from pipeline.stream_ingest import run_stream_ingestion as run_stream
+
+        run_stream(spark, config)
+
     duration_sec = int(round(time.perf_counter() - wall_start))
-    pipeline_stage = str(config.get("pipeline_stage", "2"))
+    # DQ after stream so execution_seconds and Gold/stream counts match panel expectations for Stage 3.
     if pipeline_stage != "1":
         logger.info("=== DQ report (stage %s) ===", pipeline_stage)
         write_dq_report(
