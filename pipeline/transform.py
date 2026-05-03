@@ -1,15 +1,13 @@
 """
 Silver layer: Clean and conform Bronze tables into validated Silver Delta tables.
 
-Paths, casting hints (`silver.casting`), and DQ file location (`dq.rules_path`)
-live in pipeline_config.yaml. Rule definitions live in dq_rules.yaml
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from pyspark.sql import DataFrame, SparkSession
@@ -19,25 +17,48 @@ from pyspark.sql.window import Window
 logger = logging.getLogger(__name__)
 
 
-def _dq_rules_path(config: dict) -> str:
+def _dq_rules_path(config: dict) -> Optional[str]:
+    """First existing file wins: config → DQ_RULES_PATH env → default mount → packaged copy."""
     dq_cfg = config.get("dq") or {}
-    path = dq_cfg.get("rules_path") or "/data/config/dq_rules.yaml"
-    if os.path.isfile(path):
-        return path
     packaged = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "config", "dq_rules.yaml")
     )
-    return packaged if os.path.isfile(packaged) else path
+    candidates: list[str] = []
+    rp = dq_cfg.get("rules_path")
+    if rp:
+        candidates.append(str(rp).strip())
+    env_p = os.environ.get("DQ_RULES_PATH")
+    if env_p:
+        candidates.append(env_p.strip())
+    candidates.append("/data/config/dq_rules.yaml")
+    candidates.append(packaged)
+
+    seen: set[str] = set()
+    for p in candidates:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def _load_dq_rules(config: dict) -> dict[str, Any]:
     path = _dq_rules_path(config)
+    if path is None:
+        logger.warning(
+            "DQ rules file not found (tried dq.rules_path, DQ_RULES_PATH, "
+            "/data/config/dq_rules.yaml, packaged config/dq_rules.yaml); "
+            "continuing with empty rule defaults."
+        )
+        return {}
     logger.info("Loading DQ rules from %s", path)
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
 def _write_silver_delta(df: DataFrame, path: str) -> None:
+    # Single helper here just to prevent code duplication.
     (
         df.write.format("delta")
         .mode("overwrite")
@@ -52,6 +73,7 @@ def _parse_multi_format_date(column_name: str):
 
 
 def _parse_multi_format_date_expr(col):
+    # Order: ISO first (Stage 1), then DD/MM/variants, then epoch strings (Stage 2).
     c = F.trim(col.cast("string"))
     iso = F.to_date(c, "yyyy-MM-dd")
     dmy = F.coalesce(F.to_date(c, "dd/MM/yyyy"), F.to_date(c, "d/M/yyyy"))
@@ -63,11 +85,13 @@ def _parse_multi_format_date_expr(col):
 
 
 def _dedupe_latest(df: DataFrame, key_col: str, order_col: str) -> DataFrame:
+    # row_number shuffle: costly but deterministic; order_col ties duplicate tx_ids to one row.
     w = Window.partitionBy(key_col).orderBy(F.col(order_col).desc())
     return df.withColumn("_rn", F.row_number().over(w)).filter(F.col("_rn") == 1).drop("_rn")
 
 
 def _apply_customer_casting(df: DataFrame, silver_cfg: dict) -> DataFrame:
+    # Column lists default to Stage 1 shapes when YAML omits silver.casting.*.
     spec = (silver_cfg.get("casting") or {}).get("customers") or {}
     out = df
     for col_name in spec.get("date_columns", ["dob"]):
@@ -92,6 +116,8 @@ def _apply_accounts_casting(df: DataFrame, silver_cfg: dict) -> DataFrame:
 
 
 def _normalize_currency_exprs(dq_rules: dict[str, Any]):
+    # Returns (normalized column, variant flag): Gold output_schema requires display "ZAR"
+    # while still flagging non-literal-ZAR source values as CURRENCY_VARIANT.
     cur_rules = dq_rules.get("currency") or {}
     canonical = str(cur_rules.get("canonical", "ZAR")).upper()
     raw_map = cur_rules.get("normalise_map") or {"ZAR": "ZAR"}
@@ -112,6 +138,8 @@ def _normalize_currency_exprs(dq_rules: dict[str, Any]):
 
 
 def _transactions_flatten(bronze_tx: DataFrame) -> DataFrame:
+    # Stage 1 JSON omits merchant_subcategory key; Spark may omit column — use lit(None).
+    # Nested location kept out of Silver surface as province only (Gold needs province).
     cols = bronze_tx.columns
     province_col = (
         F.col("location.province") if "location" in cols else F.lit(None).cast("string")
@@ -147,7 +175,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
     bronze_base = out_cfg["bronze_path"]
     silver_base = out_cfg["silver_path"]
 
-    # ── Customers ───────────────────────────────────────────────────────────
+    # ── Customers (drive referential envelope for accounts) ─────────────────
     logger.info("Silver: customers — reading Bronze")
     cust_bronze = spark.read.format("delta").load(os.path.join(bronze_base, "customers"))
     cust_work = _dedupe_latest(cust_bronze, "customer_id", order_col)
@@ -155,7 +183,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
     logger.info("Silver: customers — writing Delta")
     _write_silver_delta(cust_work, os.path.join(silver_base, "customers"))
 
-    # ── Accounts (customer_ref must exist on Silver customers) ─────────────
+    # ── Accounts: drop NULL_REQUIRED PK rows (Stage 2); inner join valid customers
     logger.info("Silver: accounts — reading Bronze")
     acct_bronze = spark.read.format("delta").load(os.path.join(bronze_base, "accounts"))
     acct_work = acct_bronze.filter(
@@ -175,7 +203,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
     logger.info("Silver: accounts — writing Delta")
     _write_silver_delta(acct_work, os.path.join(silver_base, "accounts"))
 
-    # ── Transactions ──────────────────────────────────────────────────────────
+    # ── Transactions: DQ flags + normalized currency; orphans vs Silver accounts slice
     logger.info("Silver: transactions — reading Bronze")
     tx_bronze = spark.read.format("delta").load(os.path.join(bronze_base, "transactions"))
     tx_work = _dedupe_latest(tx_bronze, "transaction_id", order_col)
@@ -193,6 +221,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
                 _parse_multi_format_date_expr(F.col("_transaction_date_raw")),
             )
 
+    # Keep raw amount string-side for TYPE_MISMATCH when cast fails (string numerics).
     tx_work = tx_work.withColumn("_amount_raw", F.col("amount")).withColumn(
         "amount",
         F.col("amount").cast("decimal(18,2)"),
@@ -202,6 +231,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
     required = tx_rules.get("required_non_null") or []
     allowed_tt = list(tx_rules.get("transaction_type_allowed") or [])
     allowed_ch = list(tx_rules.get("channel_allowed") or [])
+    # Checks will be disabled at stage 1 as we have empty lists for required. 
 
     null_req = None
     for field in required:
@@ -244,6 +274,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
 
     norm_cur, cur_variant = _normalize_currency_exprs(dq_rules)
 
+    # Orphan = tx.account_id not in post-filter Silver accounts.
     acc_hits = acct_work.select("account_id").distinct().withColumn("_acct_hit", F.lit(1))
     tx_join = tx_work.join(acc_hits, on="account_id", how="left")
     orphaned = tx_join.account_id.isNotNull() & (
@@ -252,6 +283,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
 
     domain_bad = tt_bad | ch_bad
 
+    # Precedence matches output_schema single-flag semantics (first hit wins).
     dq_flag = (
         F.when(null_req if null_req is not None else F.lit(False), F.lit("NULL_REQUIRED"))
         .when(orphaned, F.lit("ORPHANED_ACCOUNT"))
@@ -261,8 +293,7 @@ def run_transformation(spark: SparkSession, config: dict) -> None:
         .otherwise(F.lit(None).cast("string"))
     )
 
-    # dq_flag must be attached while `_transaction_date_raw` / `_amount_raw` still exist
-    # (Spark resolves Column refs against the DataFrame at analysis time).
+    # Build dq_flag before dropping helper cols (Spark binds columns by DF lineage).
     tx_out = (
         tx_join.withColumn("dq_flag", dq_flag)
         .drop("_acct_hit", "_amount_raw", "_transaction_date_raw")

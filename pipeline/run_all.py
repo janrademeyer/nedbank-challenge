@@ -19,7 +19,6 @@ import os
 os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
 os.environ.setdefault("SPARK_LOCAL_HOSTNAME", "localhost")
 
-import yaml
 import logging
 
 from pipeline.ingest import run_ingestion
@@ -46,4 +45,4 @@ if __name__ == "__main__":
     run_transformation(spark, config)
 
     logger.info("=== Stage: Gold provisioning ===")
-    run_provisioning()
+    run_provisioning(spark, config)

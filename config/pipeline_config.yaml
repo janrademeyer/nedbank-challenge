@@ -43,10 +43,11 @@ output:
 spark:
   master: local[2]
   app_name: nedbank-de-pipeline
-  shuffle_partitions: 8
-  # Writable bind mount; avoids Snappy JNI on noexec tmpfs (see helper.py java.io.tmpdir).
+  shuffle_partitions: 4
+  # Optional override; if omitted, helper.py still uses /data/output/_spark_tmp (writable mount).
   local_dir: /data/output/_spark_tmp
-  parquet_compression: gzip
+  # snappy is faster / lighter CPU than gzip; needs JNI temp on a writable dir (local_dir above).
+  parquet_compression: snappy
 
 # ── Silver casting / dedupe (extend without code changes where possible) ──
 silver:
